@@ -18,6 +18,11 @@ KEY_X = "x"
 KEY_Y = "y"
 KEY_ID = "id"
 
+KEY_MESSAGES = "Messages"
+KEY_MD5 = "MD5OfBody"
+KEY_BODY = "Body"
+KEY_MESSAGE = "Message"
+
 
 def main():
     session = boto3.Session(
@@ -70,9 +75,17 @@ def main():
         )
         subscription_arn = subscription['SubscriptionArn']
 
+        data = {}
+
         while True:
             response = sqs.receive_message(QueueUrl=queue_url)
-            print(response)
+
+            if KEY_MESSAGES in response:
+                for message in response[KEY_MESSAGES]:
+                    if message[KEY_MD5] not in data:
+                        body = json.loads(message[KEY_BODY])
+                        data[message[KEY_MD5]] = body[KEY_MESSAGE]
+                        print("{0} : {1}".format(message[KEY_MD5], body[KEY_MESSAGE]))
 
 
     except Exception as e:
