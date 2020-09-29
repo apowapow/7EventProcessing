@@ -23,6 +23,11 @@ KEY_MD5 = "MD5OfBody"
 KEY_BODY = "Body"
 KEY_MESSAGE = "Message"
 
+KEY_LOCATION_ID = "locationId"
+KEY_EVENT_ID = "eventId"
+KEY_VALUE = "value"
+KEY_TIMESTAMP = "timestamp"
+
 
 def main():
     session = boto3.Session(
@@ -42,7 +47,9 @@ def main():
     try:
         # Part 1: task 1
         bucket = s3.Bucket(args.bucket_name)
-        json_loc = get_json(bucket, FILE_LOCATIONS)
+
+        loc = get_json(bucket, FILE_LOCATIONS)
+        loc_monitor = [d[KEY_ID] for d in loc]
 
         # Part 1: task 2
         queue = sqs.create_queue(QueueName=QUEUE_NAME)
@@ -77,15 +84,16 @@ def main():
 
         data = {}
 
-        while True:
+        for i in range(100):
             response = sqs.receive_message(QueueUrl=queue_url)
 
             if KEY_MESSAGES in response:
                 for message in response[KEY_MESSAGES]:
-                    if message[KEY_MD5] not in data:
-                        body = json.loads(message[KEY_BODY])
-                        data[message[KEY_MD5]] = body[KEY_MESSAGE]
-                        print("{0} : {1}".format(message[KEY_MD5], body[KEY_MESSAGE]))
+                    body = json.loads(message[KEY_BODY])
+                    body_message = json.loads(body[KEY_MESSAGE])
+
+                    if body_message[KEY_LOCATION_ID] in loc_monitor:
+                        pass  # todo properly organise data
 
 
     except Exception as e:
@@ -94,6 +102,7 @@ def main():
     finally:
         if queue and queue_url:
             sqs.delete_queue(QueueUrl=queue_url)
+
 
 
 def get_json(bucket, file_name):
