@@ -28,6 +28,7 @@ KEY_MESSAGES = "Messages"
 KEY_MD5 = "MD5OfBody"
 KEY_BODY = "Body"
 KEY_MESSAGE = "Message"
+KEY_RECEIPT_HANDLE = "ReceiptHandle"
 
 KEY_LOCATION_ID = "locationId"
 KEY_EVENT_ID = "eventId"
@@ -96,38 +97,41 @@ def main():
             response = sqs.receive_message(QueueUrl=queue_url)
 
             if KEY_MESSAGES in response:
-                for message in response[KEY_MESSAGES]:
-                    body = json.loads(message[KEY_BODY])
-                    body_message = json.loads(body[KEY_MESSAGE])
+                message = response[KEY_MESSAGES][0]
+                body = json.loads(message[KEY_BODY])
+                body_message = json.loads(body[KEY_MESSAGE])
+                body_receipt_handle = message[KEY_RECEIPT_HANDLE]
 
-                    msg_loc = body_message[KEY_LOCATION_ID]
-                    msg_eve = body_message[KEY_EVENT_ID]
-                    msg_val = body_message[KEY_VALUE]
-                    msg_tim = body_message[KEY_TIMESTAMP]
+                msg_loc = body_message[KEY_LOCATION_ID]
+                msg_eve = body_message[KEY_EVENT_ID]
+                msg_val = body_message[KEY_VALUE]
+                msg_tim = body_message[KEY_TIMESTAMP]
 
-                    msg_time_datetime = datetime.fromtimestamp(msg_tim / 1000)
-                    msg_time_format = msg_time_datetime.strftime("%Y-%m-%d-%H-%M")
+                msg_time_datetime = datetime.fromtimestamp(msg_tim / 1000)
+                msg_time_format = msg_time_datetime.strftime("%Y-%m-%d-%H-%M")
 
-                    if msg_loc in loc_monitor:
-                        # key by location id
-                        if msg_loc not in data_loc:
-                            data_loc[msg_loc] = {}
+                if msg_loc in loc_monitor:
+                    # key by location id
+                    if msg_loc not in data_loc:
+                        data_loc[msg_loc] = {}
 
-                        # key by minute of day within location id
-                        if msg_time_format not in data_loc[msg_loc]:
-                            data_loc[msg_loc][msg_time_format] = []
+                    # key by minute of day within location id
+                    if msg_time_format not in data_loc[msg_loc]:
+                        data_loc[msg_loc][msg_time_format] = []
 
-                        # ignore duplicates
-                        for elem in data_loc[msg_loc][msg_time_format]:
-                            if elem[KEY_EVENT_ID] == msg_eve:
-                                continue
+                    # ignore duplicates
+                    for elem in data_loc[msg_loc][msg_time_format]:
+                        if elem[KEY_EVENT_ID] == msg_eve:
+                            continue
 
-                        data_loc[msg_loc][msg_time_format].append(
-                            {KEY_EVENT_ID: msg_eve, KEY_VALUE: msg_val, KEY_TIMESTAMP: msg_tim})
-                        count += 1
+                    data_loc[msg_loc][msg_time_format].append(
+                        {KEY_EVENT_ID: msg_eve, KEY_VALUE: msg_val, KEY_TIMESTAMP: msg_tim})
+                    count += 1
 
-                        if count % COUNT_PROGRESS_INTERVAL == 0:
-                            print("  {0}".format(count))
+                    if count % COUNT_PROGRESS_INTERVAL == 0:
+                        print("  {0}".format(count))
+
+                sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=body_receipt_handle)
 
         print("DONE")
         write_averages(data_loc, FILE_OUTPUT_CSV)
