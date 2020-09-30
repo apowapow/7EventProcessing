@@ -15,8 +15,6 @@ S3 = "s3"
 SQS = "sqs"
 SNS = "sns"
 
-FILE_LOCATIONS = "locations.json"
-FILE_OUTPUT_CSV = "output.csv"
 REGION_NAME = "eu-west-1"
 QUEUE_NAME = "apaltr-{0}".format(str(uuid.uuid4()))
 
@@ -58,7 +56,7 @@ def main():
     try:
         bucket = s3.Bucket(args.bucket_name)
 
-        loc = get_json(bucket, FILE_LOCATIONS)
+        loc = get_json(bucket, args.input_json)
         loc_monitor = [d[KEY_ID] for d in loc]
 
         # Part 1: task 2
@@ -90,7 +88,7 @@ def main():
         subscription_arn = subscription['SubscriptionArn']
 
         count = 0
-        time_stop = datetime.now() + timedelta(hours=1)
+        time_stop = datetime.now() + timedelta(minutes=int(args.read_minutes))
         print("Collecting data until {0} ...".format(time_stop))
 
         while datetime.now() < time_stop:
@@ -134,7 +132,7 @@ def main():
                 sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=body_receipt_handle)
 
         print("DONE")
-        write_averages(data_loc, FILE_OUTPUT_CSV)
+        write_averages(data_loc, args.output_csv)
 
     except Exception as e:
         print("Exception: {0}".format(e))
@@ -197,6 +195,9 @@ if __name__ == "__main__":
     parser.add_argument('-aws_secret', type=str)
     parser.add_argument('-bucket_name', type=str)
     parser.add_argument('-topic_arn', type=str)
+    parser.add_argument('-input_json', type=str)
+    parser.add_argument('-output_csv', type=str)
+    parser.add_argument('-read_minutes', type=str)
     args = parser.parse_args()
 
     main()
