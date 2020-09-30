@@ -6,6 +6,7 @@ import csv
 import uuid
 from datetime import datetime, timedelta
 from collections import deque
+from pprint import pprint
 
 args = None
 data_loc = {}
@@ -31,9 +32,10 @@ KEY_MESSAGE = "Message"
 KEY_LOCATION_ID = "locationId"
 KEY_EVENT_ID = "eventId"
 KEY_VALUE = "value"
+KEY_AVERAGE = "average"
 KEY_TIMESTAMP = "timestamp"
 
-DEQUE_MAX_LEN = 1000
+CACHE_MAX_LEN = 1000
 COUNT_PROGRESS_INTERVAL = 25
 
 
@@ -101,24 +103,34 @@ def main():
                     msg_loc = body_message[KEY_LOCATION_ID]
                     msg_eve = body_message[KEY_EVENT_ID]
                     msg_val = body_message[KEY_VALUE]
+                    msg_tim = body_message[KEY_TIMESTAMP]
+
+                    msg_time_datetime = datetime.fromtimestamp(msg_tim / 1000)
+                    msg_time_format = msg_time_datetime.strftime("%Y-%m-%d-%H-%M")
 
                     if msg_loc in loc_monitor:
+                        # key by location id
                         if msg_loc not in data_loc:
-                            data_loc[msg_loc] = []
+                            data_loc[msg_loc] = {}
 
-                        for e in data_loc[msg_loc]:
-                            if e[KEY_EVENT_ID] == msg_eve:
-                                # print("Event id duplicate '{0}' for location '{1}'".format(msg_eve, msg_loc))
+                        # key by minute of day within location id
+                        if msg_time_format not in data_loc[msg_loc]:
+                            data_loc[msg_loc][msg_time_format] = []
+
+                        # ignore duplicates
+                        for elem in data_loc[msg_loc][msg_time_format]:
+                            if elem[KEY_EVENT_ID] == msg_eve:
                                 continue
 
-                        data_loc[msg_loc].append({KEY_EVENT_ID: msg_eve, KEY_VALUE: msg_val})
+                        data_loc[msg_loc][msg_time_format].append(
+                            {KEY_EVENT_ID: msg_eve, KEY_VALUE: msg_val, KEY_TIMESTAMP: msg_tim})
                         count += 1
 
                         if count % COUNT_PROGRESS_INTERVAL == 0:
                             print("  {0}".format(count))
-        print("DONE")
 
-        write_data_loc_to_csv(FILE_OUTPUT_CSV)
+        print("DONE")
+        write_averages(data_loc, FILE_OUTPUT_CSV)
 
     except Exception as e:
         print("Exception: {0}".format(e))
@@ -128,18 +140,26 @@ def main():
             sqs.delete_queue(QueueUrl=queue_url)
 
 
-def write_data_loc_to_csv(file_name):
-    if os.path.isfile(file_name):
-        print("Deleting existing copy of '{0}' ... ".format(file_name), end="")
-        os.remove(file_name)
-        print("DONE")
+def write_averages(data, file_name):
+    delete_file_if_exists(file_name)
+    data_csv = [[KEY_LOCATION_ID, KEY_TIMESTAMP, KEY_AVERAGE]]
 
-    data_csv = [[KEY_LOCATION_ID, KEY_EVENT_ID, KEY_VALUE]]
-    for loc, msg_list in data_loc.items():
-        for msg in msg_list:
-            data_csv.append([loc, msg[KEY_EVENT_ID], msg[KEY_VALUE]])
+    for key_location, location_data in data.items():
+        for key_time, time_data in location_data.items():
+            avg = 0
+            count = 0
+            for elem in time_data:
+                avg += elem[KEY_VALUE]
+                count += 1
+            avg = avg / count
 
-    print("Writing data to '{0}' ... ".format(file_name), end="")
+            timestamp = time_data[0][KEY_TIMESTAMP]
+            timestamp_datetime = datetime.fromtimestamp(timestamp / 1000)
+            timestamp_format = timestamp_datetime.strftime("%Y-%m-%d %H:%M")
+
+            data_csv.append([key_location, timestamp_format, avg])
+
+    print("Writing average to '{0}' ... ".format(file_name), end="")
     with open(file_name, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerows(data_csv)
@@ -147,21 +167,24 @@ def write_data_loc_to_csv(file_name):
 
 
 def get_json(bucket, file_name):
-    download_file_delete_existing(bucket, file_name)
+    delete_file_if_exists(file_name)
+    download_file(bucket, file_name)
 
     with open(file_name, 'r') as f:
         return json.loads(f.read())
 
 
-def download_file_delete_existing(bucket, file_name):
+def download_file(bucket, file_name):
+    print("Downloading '{0}' ... ".format(file_name), end="")
+    bucket.download_file(file_name, file_name)
+    print("DONE")
+
+
+def delete_file_if_exists(file_name):
     if os.path.isfile(file_name):
         print("Deleting existing copy of '{0}' ... ".format(file_name), end="")
         os.remove(file_name)
         print("DONE")
-
-    print("Downloading '{0}' ... ".format(file_name), end="")
-    bucket.download_file(file_name, file_name)
-    print("DONE")
 
 
 if __name__ == "__main__":
