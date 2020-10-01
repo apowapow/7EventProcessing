@@ -17,7 +17,7 @@ SNS = "sns"
 
 REGION_NAME = "eu-west-1"
 QUEUE_NAME = "apaltr-{0}".format(str(uuid.uuid4()))
-NUM_PARALLEL = 10
+NUM_PARALLEL = 1
 
 KEY_X = "x"
 KEY_Y = "y"
@@ -28,7 +28,8 @@ KEY_MD5 = "MD5OfBody"
 KEY_BODY = "Body"
 KEY_MESSAGE = "Message"
 KEY_RECEIPT_HANDLE = "ReceiptHandle"
-
+KEY_RECEIPT_HANDLE_MESSAGE_ID = "Id"
+KEY_MESSAGE_ID = "MessageId"
 KEY_LOCATION_ID = "locationId"
 KEY_EVENT_ID = "eventId"
 KEY_VALUE = "value"
@@ -68,7 +69,10 @@ def process_receive_message(time_stop, queue_url, queue_bodies, queue_receipt_ha
             if KEY_MESSAGES in response:
                 for message in response[KEY_MESSAGES]:
                     queue_bodies.put(message[KEY_BODY])
-                    queue_receipt_handles.put(message[KEY_RECEIPT_HANDLE])
+                    queue_receipt_handles.put({
+                        KEY_RECEIPT_HANDLE_MESSAGE_ID: message[KEY_MESSAGE_ID],
+                        KEY_RECEIPT_HANDLE: message[KEY_RECEIPT_HANDLE]
+                    })
         print("Thread for {0}: DONE".format(inspect.currentframe().f_code.co_name))
     except Exception as e:
         print("EXCEPTION in {0}: {1}".format(inspect.currentframe().f_code.co_name, e))
@@ -136,18 +140,18 @@ def process_response(time_stop, loc_monitor, queue_bodies):
 def process_delete_message(time_stop, queue_url, queue_receipt_handles):
     try:
         while datetime.now() < time_stop or (not queue_receipt_handles.empty()):
-            if not queue_receipt_handles.empty():
-                receipt_handle = None
+            entries = []
 
-                try:
-                    receipt_handle = queue_receipt_handles.get_nowait()
-                except:
-                    continue
+            while len(entries) < 10:
+                if not queue_receipt_handles.empty():
+                    try:
+                        entry = queue_receipt_handles.get_nowait()
+                        entries.append(entry)
+                    except:
+                        continue
 
-                try:
-                    sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
-                except:
-                    break
+            sqs.delete_message_batch(QueueUrl=queue_url, Entries=entries)
+
         print("Thread for {0}: DONE".format(inspect.currentframe().f_code.co_name))
     except Exception as e:
         print("EXCEPTION in {0}: {1}".format(inspect.currentframe().f_code.co_name, e))
