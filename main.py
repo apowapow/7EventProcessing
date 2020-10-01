@@ -4,12 +4,12 @@ import os.path
 import json
 import csv
 import uuid
+import inspect
 from datetime import datetime, timedelta
+import multiprocessing as mp
 from collections import deque
 from pprint import pprint
 
-args = None
-data_loc = {}
 
 S3 = "s3"
 SQS = "sqs"
@@ -17,6 +17,7 @@ SNS = "sns"
 
 REGION_NAME = "eu-west-1"
 QUEUE_NAME = "apaltr-{0}".format(str(uuid.uuid4()))
+NUM_PARALLEL = 10
 
 KEY_X = "x"
 KEY_Y = "y"
@@ -38,20 +39,123 @@ CACHE_MAX_LEN = 1000
 COUNT_PROGRESS_INTERVAL = 25
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument('-aws_public', type=str)
+parser.add_argument('-aws_secret', type=str)
+parser.add_argument('-bucket_name', type=str)
+parser.add_argument('-topic_arn', type=str)
+parser.add_argument('-input_json', type=str)
+parser.add_argument('-output_csv', type=str)
+parser.add_argument('-read_minutes', type=str)
+args = parser.parse_args()
+
+session = boto3.Session(
+    aws_access_key_id=args.aws_public,
+    aws_secret_access_key=args.aws_secret,
+    region_name=REGION_NAME
+)
+
+s3 = session.resource(S3)
+sqs = session.client(SQS)
+sns = session.client(SNS)
+
+
+def process_receive_message(time_stop, queue_url, queue_bodies, queue_receipt_handles):
+    try:
+        while datetime.now() < time_stop:
+            response = sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=10)
+
+            if KEY_MESSAGES in response:
+                for message in response[KEY_MESSAGES]:
+                    queue_bodies.put(message[KEY_BODY])
+                    queue_receipt_handles.put(message[KEY_RECEIPT_HANDLE])
+        print("Thread for {0}: DONE".format(inspect.currentframe().f_code.co_name))
+    except Exception as e:
+        print("EXCEPTION in {0}: {1}".format(inspect.currentframe().f_code.co_name, e))
+
+
+def process_response(time_stop, loc_monitor, queue_bodies):
+    data_loc = {}
+
+    while datetime.now() < time_stop or (not queue_bodies.empty()):
+        if not queue_bodies.empty():
+            body_raw = None
+
+            try:
+                body_raw = queue_bodies.get_nowait()
+
+                body = json.loads(body_raw)
+                body_message = json.loads(body[KEY_MESSAGE])
+
+                if KEY_LOCATION_ID not in body_message:
+                    continue
+
+                if KEY_EVENT_ID not in body_message:
+                    continue
+
+                if KEY_VALUE not in body_message:
+                    continue
+
+                if KEY_TIMESTAMP not in body_message:
+                    continue
+
+                msg_loc = body_message[KEY_LOCATION_ID]
+                msg_eve = body_message[KEY_EVENT_ID]
+                msg_val = body_message[KEY_VALUE]
+                msg_tim = body_message[KEY_TIMESTAMP]
+
+                msg_time_datetime = datetime.fromtimestamp(msg_tim / 1000)
+                msg_time_format = msg_time_datetime.strftime("%Y-%m-%d-%H-%M")
+
+                if msg_loc in loc_monitor:
+                    # key by location id
+                    if msg_loc not in data_loc:
+                        data_loc[msg_loc] = {}
+
+                    # key by minute of day within location id
+                    if msg_time_format not in data_loc[msg_loc]:
+                        data_loc[msg_loc][msg_time_format] = []
+
+                    # ignore duplicates
+                    for elem in data_loc[msg_loc][msg_time_format]:
+                        if elem[KEY_EVENT_ID] == msg_eve:
+                            continue
+
+                    data_loc[msg_loc][msg_time_format].append(
+                        {KEY_EVENT_ID: msg_eve, KEY_VALUE: msg_val, KEY_TIMESTAMP: msg_tim})
+
+            except Exception as e:
+                print("EXCEPTION in {0}: {1}, continuing ... ".format(inspect.currentframe().f_code.co_name, e))
+                continue
+
+    write_averages(data_loc, args.output_csv)
+
+    print("Thread for {0}: DONE".format(inspect.currentframe().f_code.co_name))
+
+
+def process_delete_message(time_stop, queue_url, queue_receipt_handles):
+    try:
+        while datetime.now() < time_stop or (not queue_receipt_handles.empty()):
+            if not queue_receipt_handles.empty():
+                receipt_handle = None
+
+                try:
+                    receipt_handle = queue_receipt_handles.get_nowait()
+                except:
+                    continue
+
+                try:
+                    sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+                except:
+                    break
+        print("Thread for {0}: DONE".format(inspect.currentframe().f_code.co_name))
+    except Exception as e:
+        print("EXCEPTION in {0}: {1}".format(inspect.currentframe().f_code.co_name, e))
+
+
 def main():
-    session = boto3.Session(
-        aws_access_key_id=args.aws_public,
-        aws_secret_access_key=args.aws_secret,
-        region_name=REGION_NAME
-    )
-
-    s3 = session.resource(S3)
-    sqs = session.client(SQS)
-    sns = session.client(SNS)
-
     queue = None
     queue_url = None
-    queue_arn = None
 
     try:
         bucket = s3.Bucket(args.bucket_name)
@@ -80,66 +184,43 @@ def main():
         policy_json = json.dumps(policy_document)
         sqs.set_queue_attributes(QueueUrl=queue_url, Attributes={"Policy": policy_json})
 
-        subscription = sns.subscribe(
+        sns.subscribe(
             TopicArn=args.topic_arn,
             Protocol=SQS,
             Endpoint=queue_arn
         )
-        subscription_arn = subscription['SubscriptionArn']
 
-        count = 0
         time_stop = datetime.now() + timedelta(minutes=int(args.read_minutes))
-        print("Collecting data until {0} ...".format(time_stop))
+        print("Collecting data until {0} ... ".format(time_stop))
 
-        while datetime.now() < time_stop:
-            response = sqs.receive_message(QueueUrl=queue_url)
+        # multiprocessing
+        pool = mp.Pool()
+        manager = mp.Manager()
 
-            if KEY_MESSAGES in response:
-                message = response[KEY_MESSAGES][0]
-                body = json.loads(message[KEY_BODY])
-                body_message = json.loads(body[KEY_MESSAGE])
-                body_receipt_handle = message[KEY_RECEIPT_HANDLE]
+        # create managed queues
+        queue_bodies = manager.Queue()
+        queue_receipt_handles = manager.Queue()
 
-                msg_loc = body_message[KEY_LOCATION_ID]
-                msg_eve = body_message[KEY_EVENT_ID]
-                msg_val = body_message[KEY_VALUE]
-                msg_tim = body_message[KEY_TIMESTAMP]
+        # launch workers, passing them the queues they need
+        for i in range(NUM_PARALLEL):
+            pool.apply_async(process_receive_message, (time_stop, queue_url, queue_bodies, queue_receipt_handles))
 
-                msg_time_datetime = datetime.fromtimestamp(msg_tim / 1000)
-                msg_time_format = msg_time_datetime.strftime("%Y-%m-%d-%H-%M")
+        pool.apply_async(process_response, (time_stop, loc_monitor, queue_bodies))
 
-                if msg_loc in loc_monitor:
-                    # key by location id
-                    if msg_loc not in data_loc:
-                        data_loc[msg_loc] = {}
+        for i in range(NUM_PARALLEL):
+            pool.apply_async(process_delete_message, (time_stop, queue_url, queue_receipt_handles))
 
-                    # key by minute of day within location id
-                    if msg_time_format not in data_loc[msg_loc]:
-                        data_loc[msg_loc][msg_time_format] = []
-
-                    # ignore duplicates
-                    for elem in data_loc[msg_loc][msg_time_format]:
-                        if elem[KEY_EVENT_ID] == msg_eve:
-                            continue
-
-                    data_loc[msg_loc][msg_time_format].append(
-                        {KEY_EVENT_ID: msg_eve, KEY_VALUE: msg_val, KEY_TIMESTAMP: msg_tim})
-                    count += 1
-
-                    if count % COUNT_PROGRESS_INTERVAL == 0:
-                        print("  {0}".format(count))
-
-                sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=body_receipt_handle)
-
-        print("DONE")
-        write_averages(data_loc, args.output_csv)
+        pool.close()
+        pool.join()
 
     except Exception as e:
-        print("Exception: {0}".format(e))
+        print("EXCEPTION in {0}: {1}".format(inspect.currentframe().f_code.co_name, e))
 
     finally:
         if queue and queue_url:
             sqs.delete_queue(QueueUrl=queue_url)
+
+    print("FINISHED")
 
 
 def write_averages(data, file_name):
@@ -190,14 +271,4 @@ def delete_file_if_exists(file_name):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-aws_public', type=str)
-    parser.add_argument('-aws_secret', type=str)
-    parser.add_argument('-bucket_name', type=str)
-    parser.add_argument('-topic_arn', type=str)
-    parser.add_argument('-input_json', type=str)
-    parser.add_argument('-output_csv', type=str)
-    parser.add_argument('-read_minutes', type=str)
-    args = parser.parse_args()
-
     main()
